@@ -1,0 +1,45 @@
+# Environnement virtuel
+cyberguard_env/
+venv/
+env/
+
+# Fichiers Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Logs
+logs/
+*.log
+
+# Base de données
+*.db
+*.sqlite3
+
+# Configuration sensible
+.env
+config/database.ini
+
+# Modèles entraînés (trop volumineux)
+models/trained/*.joblib
+
+# Données capturées
+data/captured/
+data/processed/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp

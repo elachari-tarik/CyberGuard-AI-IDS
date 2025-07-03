@@ -1,0 +1,362 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - CyberGuard AI{% endblock %}
+
+{% block content %}
+<div class="row">
+    <!-- Métriques principales -->
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">Paquets Analysés</h6>
+            <h3 id="packets-count">0</h3>
+            <small class="text-success">+12% dernière heure</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">Flux Réseau</h6>
+            <h3 id="flows-count">0</h3>
+            <small class="text-info">En temps réel</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">Anomalies Détectées</h6>
+            <h3 id="anomalies-count" class="text-warning">0</h3>
+            <small id="anomaly-rate">0%</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">Alertes Actives</h6>
+            <h3 id="alerts-count" class="text-danger">0</h3>
+            <small id="alerts-today">0 aujourd'hui</small>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <!-- Graphique des alertes en temps réel -->
+    <div class="col-md-8">
+        <div class="metric-card">
+            <h5>Détections en Temps Réel</h5>
+            <canvas id="realTimeChart" width="400" height="200"></canvas>
+        </div>
+    </div>
+    
+    <!-- Alertes récentes -->
+    <div class="col-md-4">
+        <div class="metric-card">
+            <h5>Alertes Récentes</h5>
+            <div id="recent-alerts" style="max-height: 300px; overflow-y: auto;">
+                <!-- Les alertes seront chargées ici -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <!-- Répartition des protocoles -->
+    <div class="col-md-6">
+        <div class="metric-card">
+            <h5>Répartition des Protocoles</h5>
+            <canvas id="protocolChart" width="400" height="200"></canvas>
+        </div>
+    </div>
+    
+    <!-- Top IPs suspectes -->
+    <div class="col-md-6">
+        <div class="metric-card">
+            <h5>IPs Suspectes (24h)</h5>
+            <div id="suspicious-ips">
+                <!-- Liste des IPs suspectes -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Flux réseau en temps réel -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="metric-card">
+            <h5>Flux Réseau en Temps Réel</h5>
+            <div class="table-responsive">
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Source</th>
+                            <th>Destination</th>
+                            <th>Protocol</th>
+                            <th>Prédiction</th>
+                            <th>Confiance</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="flows-table">
+                        <!-- Les flux seront chargés ici -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Variables globales pour les graphiques
+    let realTimeChart, protocolChart;
+    let realTimeData = [];
+    let maxDataPoints = 50;
+    
+    // Initialiser les graphiques
+    function initCharts() {
+        // Graphique temps réel
+        const rtCtx = document.getElementById('realTimeChart').getContext('2d');
+        realTimeChart = new Chart(rtCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Anomalies Détectées',
+                    data: [],
+                    borderColor: 'rgb(255, 99, 132)',
+                    backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                    tension: 0.1
+                }, {
+                    label: 'Trafic Normal',
+                    data: [],
+                    borderColor: 'rgb(54, 162, 235)',
+                    backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: {
+                        beginAtZero: true
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: true
+                    }
+                }
+            }
+        });
+        
+        // Graphique des protocoles
+        const pCtx = document.getElementById('protocolChart').getContext('2d');
+        protocolChart = new Chart(pCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['TCP', 'UDP', 'ICMP', 'Autres'],
+                datasets: [{
+                    data: [0, 0, 0, 0],
+                    backgroundColor: [
+                        'rgba(255, 99, 132, 0.8)',
+                        'rgba(54, 162, 235, 0.8)',
+                        'rgba(255, 205, 86, 0.8)',
+                        'rgba(75, 192, 192, 0.8)'
+                    ]
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom'
+                    }
+                }
+            }
+        });
+    }
+    
+    // Charger les données du dashboard
+    function loadDashboardData() {
+        // Charger les statistiques
+        fetch('/api/stats')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    updateMetrics(data.data);
+                }
+            })
+            .catch(error => console.error('Erreur lors du chargement des stats:', error));
+        
+        // Charger les alertes récentes
+        fetch('/api/alerts?limit=10')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    updateRecentAlerts(data.data);
+                }
+            })
+            .catch(error => console.error('Erreur lors du chargement des alertes:', error));
+        
+        // Charger les flux réseau
+        fetch('/api/network-flows?limit=20')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    updateFlowsTable(data.data);
+                }
+            })
+            .catch(error => console.error('Erreur lors du chargement des flux:', error));
+    }
+    
+    // Mettre à jour les métriques
+    function updateMetrics(data) {
+        const idsStats = data.ids_stats || {};
+        const networkStats = data.network_stats || {};
+        const alertStats = data.alert_stats || {};
+        
+        // Mettre à jour les compteurs
+        document.getElementById('packets-count').textContent = 
+            (idsStats.packets_processed || 0).toLocaleString();
+        document.getElementById('flows-count').textContent = 
+            (idsStats.flows_analyzed || 0).toLocaleString();
+        document.getElementById('anomalies-count').textContent = 
+            (idsStats.anomalies_detected || 0).toLocaleString();
+        document.getElementById('alerts-count').textContent = 
+            (idsStats.alerts_generated || 0).toLocaleString();
+        
+        // Taux d'anomalies
+        const anomalyRate = networkStats.anomaly_rate || 0;
+        document.getElementById('anomaly-rate').textContent = `${anomalyRate.toFixed(1)}%`;
+        
+        // Alertes aujourd'hui
+        const alertsToday = alertStats.total_alerts || 0;
+        document.getElementById('alerts-today').textContent = `${alertsToday} aujourd'hui`;
+        
+        // Mettre à jour le graphique des protocoles
+        if (networkStats.protocols) {
+            const protocols = networkStats.protocols;
+            const labels = Object.keys(protocols);
+            const values = Object.values(protocols);
+            
+            protocolChart.data.labels = labels;
+            protocolChart.data.datasets[0].data = values;
+            protocolChart.update();
+        }
+        
+        // Mettre à jour le graphique temps réel
+        updateRealTimeChart(idsStats);
+    }
+    
+    // Mettre à jour le graphique temps réel
+    function updateRealTimeChart(stats) {
+        const now = new Date().toLocaleTimeString();
+        const anomalies = stats.anomalies_detected || 0;
+        const normal = (stats.flows_analyzed || 0) - anomalies;
+        
+        realTimeData.push({
+            time: now,
+            anomalies: anomalies,
+            normal: normal
+        });
+        
+        // Limiter le nombre de points
+        if (realTimeData.length > maxDataPoints) {
+            realTimeData.shift();
+        }
+        
+        // Mettre à jour le graphique
+        realTimeChart.data.labels = realTimeData.map(d => d.time);
+        realTimeChart.data.datasets[0].data = realTimeData.map(d => d.anomalies);
+        realTimeChart.data.datasets[1].data = realTimeData.map(d => d.normal);
+        realTimeChart.update('none'); // Animation désactivée pour temps réel
+    }
+    
+    // Mettre à jour les alertes récentes
+    function updateRecentAlerts(alerts) {
+        const container = document.getElementById('recent-alerts');
+        container.innerHTML = '';
+        
+        if (alerts.length === 0) {
+            container.innerHTML = '<p class="text-muted">Aucune alerte récente</p>';
+            return;
+        }
+        
+        alerts.forEach(alert => {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert-card alert-${alert.severity.toLowerCase()}`;
+            alertDiv.innerHTML = `
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <strong>${alert.alert_type}</strong>
+                        <br>
+                        <small>${alert.source_ip} → ${alert.target_ip}</small>
+                        <br>
+                        <small class="text-muted">${new Date(alert.timestamp).toLocaleString()}</small>
+                    </div>
+                    <span class="badge bg-${getSeverityColor(alert.severity)}">${alert.severity}</span>
+                </div>
+            `;
+            container.appendChild(alertDiv);
+        });
+    }
+    
+    // Mettre à jour le tableau des flux
+    function updateFlowsTable(flows) {
+        const tbody = document.getElementById('flows-table');
+        tbody.innerHTML = '';
+        
+        flows.forEach(flow => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${new Date(flow.timestamp).toLocaleTimeString()}</td>
+                <td>${flow.src_ip}:${flow.src_port}</td>
+                <td>${flow.dst_ip}:${flow.dst_port}</td>
+                <td><span class="badge bg-info">${flow.protocol}</span></td>
+                <td><span class="badge bg-${flow.is_anomaly ? 'danger' : 'success'}">${flow.prediction}</span></td>
+                <td>${(flow.confidence * 100).toFixed(1)}%</td>
+                <td>${flow.is_anomaly ? '🚨' : '✅'}</td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+    
+    // Fonction utilitaire pour les couleurs de sévérité
+    function getSeverityColor(severity) {
+        const colors = {
+            'Critical': 'danger',
+            'High': 'warning',
+            'Medium': 'info',
+            'Low': 'success'
+        };
+        return colors[severity] || 'secondary';
+    }
+    
+    // Gestionnaire pour nouvelles alertes (WebSocket)
+    function handleNewAlerts(alerts) {
+        alerts.forEach(alert => {
+            if (alert.type === 'new_alert') {
+                showNotification(`Nouvelle alerte: ${alert.data.alert_type}`, 'warning');
+            }
+        });
+        
+        // Recharger les données
+        loadDashboardData();
+    }
+    
+    // Gestionnaire pour mise à jour des stats (WebSocket)
+    function handleStatsUpdate(stats) {
+        if (stats.ids_stats) {
+            updateRealTimeChart(stats.ids_stats);
+        }
+    }
+    
+    // Initialisation au chargement de la page
+    document.addEventListener('DOMContentLoaded', function() {
+        initCharts();
+        loadDashboardData();
+        
+        // Actualisation automatique toutes les 30 secondes
+        setInterval(loadDashboardData, 30000);
+    });
+</script>
+{% endblock %}
+

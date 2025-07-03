@@ -1,0 +1,426 @@
+{% extends "base.html" %}
+
+{% block title %}Alertes - CyberGuard AI{% endblock %}
+
+{% block header %}Gestion des Alertes{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <!-- Filtres -->
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Filtres</h5>
+                <div class="row">
+                    <div class="col-md-3">
+                        <label for="severity-filter" class="form-label">Sévérité</label>
+                        <select id="severity-filter" class="form-select">
+                            <option value="">Toutes</option>
+                            <option value="Critical">Critique</option>
+                            <option value="High">Élevée</option>
+                            <option value="Medium">Moyenne</option>
+                            <option value="Low">Faible</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="type-filter" class="form-label">Type</label>
+                        <select id="type-filter" class="form-select">
+                            <option value="">Tous</option>
+                            <option value="Brute Force Attack">Brute Force</option>
+                            <option value="Port Scan">Port Scan</option>
+                            <option value="DDoS Attack">DDoS</option>
+                            <option value="DNS Tunneling">DNS Tunneling</option>
+                            <option value="Anomalous Activity">Activité Anormale</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="hours-filter" class="form-label">Période</label>
+                        <select id="hours-filter" class="form-select">
+                            <option value="1">Dernière heure</option>
+                            <option value="6">6 dernières heures</option>
+                            <option value="24" selected>24 dernières heures</option>
+                            <option value="168">7 derniers jours</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="ip-filter" class="form-label">IP Source</label>
+                        <input type="text" id="ip-filter" class="form-control" placeholder="192.168.1.1">
+                    </div>
+                </div>
+                <div class="row mt-3">
+                    <div class="col-md-12">
+                        <button onclick="applyFilters()" class="btn btn-primary">Appliquer les filtres</button>
+                        <button onclick="clearFilters()" class="btn btn-secondary">Effacer</button>
+                        <button onclick="exportAlerts()" class="btn btn-success">Exporter CSV</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Statistiques des alertes -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">Total Alertes</h6>
+            <h3 id="total-alerts">0</h3>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">Critiques</h6>
+            <h3 id="critical-alerts" class="text-danger">0</h3>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">Non Résolues</h6>
+            <h3 id="unresolved-alerts" class="text-warning">0</h3>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="metric-card">
+            <h6 class="text-muted">IPs Uniques</h6>
+            <h3 id="unique-ips">0</h3>
+        </div>
+    </div>
+</div>
+
+<!-- Table des alertes -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Liste des Alertes</h5>
+                <div>
+                    <button onclick="loadAlertsData()" class="btn btn-sm btn-outline-primary">
+                        🔄 Actualiser
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Type</th>
+                                <th>Sévérité</th>
+                                <th>Source IP</th>
+                                <th>Cible IP</th>
+                                <th>Confiance</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="alerts-table-body">
+                            <!-- Les alertes seront chargées ici -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal de détails d'alerte -->
+<div class="modal fade" id="alertDetailModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Détails de l'Alerte</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="alert-detail-content">
+                <!-- Contenu chargé dynamiquement -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
+                <button type="button" class="btn btn-primary" onclick="markAsResolved()">Marquer comme Résolu</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentAlerts = [];
+    let selectedAlertId = null;
+    
+    // Charger les données des alertes
+    function loadAlertsData() {
+        const hours = document.getElementById('hours-filter').value || 24;
+        const limit = 1000; // Charge plus d'alertes pour la page dédiée
+        
+        fetch(`/api/alerts?limit=${limit}&hours=${hours}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    currentAlerts = data.data;
+                    updateAlertsTable(currentAlerts);
+                    updateAlertsStats(currentAlerts);
+                } else {
+                    showNotification('Erreur lors du chargement des alertes', 'error');
+                }
+            })
+            .catch(error => {
+                console.error('Erreur:', error);
+                showNotification('Erreur réseau', 'error');
+            });
+    }
+    
+    // Mettre à jour le tableau des alertes
+    function updateAlertsTable(alerts) {
+        const tbody = document.getElementById('alerts-table-body');
+        tbody.innerHTML = '';
+        
+        if (alerts.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="8" class="text-center text-muted">Aucune alerte trouvée</td>
+                </tr>
+            `;
+            return;
+        }
+        
+        alerts.forEach(alert => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${formatTimestamp(alert.timestamp)}</td>
+                <td>
+                    <span class="badge bg-info">${alert.alert_type}</span>
+                </td>
+                <td>
+                    <span class="badge bg-${getSeverityColor(alert.severity)}">${alert.severity}</span>
+                </td>
+                <td>
+                    <code>${alert.source_ip || 'N/A'}</code>
+                </td>
+                <td>
+                    <code>${alert.target_ip || 'N/A'}</code>
+                </td>
+                <td>
+                    <div class="progress" style="height: 20px;">
+                        <div class="progress-bar" role="progressbar" 
+                             style="width: ${(alert.confidence * 100).toFixed(0)}%">
+                            ${(alert.confidence * 100).toFixed(1)}%
+                        </div>
+                    </div>
+                </td>
+                <td>
+                    <span class="badge bg-${getStatusColor(alert.status)}">${alert.status}</span>
+                </td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" onclick="showAlertDetails(${alert.id})">
+                        👁️ Voir
+                    </button>
+                </td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+    
+    // Mettre à jour les statistiques
+    function updateAlertsStats(alerts) {
+        const total = alerts.length;
+        const critical = alerts.filter(a => a.severity === 'Critical').length;
+        const unresolved = alerts.filter(a => a.status !== 'Resolved').length;
+        const uniqueIps = new Set(alerts.map(a => a.source_ip).filter(ip => ip)).size;
+        
+        document.getElementById('total-alerts').textContent = total;
+        document.getElementById('critical-alerts').textContent = critical;
+        document.getElementById('unresolved-alerts').textContent = unresolved;
+        document.getElementById('unique-ips').textContent = uniqueIps;
+    }
+    
+    // Appliquer les filtres
+    function applyFilters() {
+        let filteredAlerts = [...currentAlerts];
+        
+        // Filtre par sévérité
+        const severity = document.getElementById('severity-filter').value;
+        if (severity) {
+            filteredAlerts = filteredAlerts.filter(a => a.severity === severity);
+        }
+        
+        // Filtre par type
+        const type = document.getElementById('type-filter').value;
+        if (type) {
+            filteredAlerts = filteredAlerts.filter(a => a.alert_type === type);
+        }
+        
+        // Filtre par IP
+        const ip = document.getElementById('ip-filter').value.trim();
+        if (ip) {
+            filteredAlerts = filteredAlerts.filter(a => 
+                (a.source_ip && a.source_ip.includes(ip)) || 
+                (a.target_ip && a.target_ip.includes(ip))
+            );
+        }
+        
+        updateAlertsTable(filteredAlerts);
+        updateAlertsStats(filteredAlerts);
+    }
+    
+    // Effacer les filtres
+    function clearFilters() {
+        document.getElementById('severity-filter').value = '';
+        document.getElementById('type-filter').value = '';
+        document.getElementById('ip-filter').value = '';
+        
+        updateAlertsTable(currentAlerts);
+        updateAlertsStats(currentAlerts);
+    }
+    
+    // Afficher les détails d'une alerte
+    function showAlertDetails(alertId) {
+        selectedAlertId = alertId;
+        const alert = currentAlerts.find(a => a.id === alertId);
+        
+        if (!alert) return;
+        
+        const content = document.getElementById('alert-detail-content');
+        content.innerHTML = `
+            <div class="row">
+                <div class="col-md-6">
+                    <h6>Informations Générales</h6>
+                    <table class="table table-sm">
+                        <tr><th>ID:</th><td>${alert.id}</td></tr>
+                        <tr><th>Type:</th><td>${alert.alert_type}</td></tr>
+                        <tr><th>Sévérité:</th><td><span class="badge bg-${getSeverityColor(alert.severity)}">${alert.severity}</span></td></tr>
+                        <tr><th>Status:</th><td><span class="badge bg-${getStatusColor(alert.status)}">${alert.status}</span></td></tr>
+                        <tr><th>Confiance:</th><td>${(alert.confidence * 100).toFixed(2)}%</td></tr>
+                        <tr><th>Timestamp:</th><td>${formatTimestamp(alert.timestamp)}</td></tr>
+                    </table>
+                </div>
+                <div class="col-md-6">
+                    <h6>Détails Réseau</h6>
+                    <table class="table table-sm">
+                        <tr><th>IP Source:</th><td><code>${alert.source_ip || 'N/A'}</code></td></tr>
+                        <tr><th>IP Cible:</th><td><code>${alert.target_ip || 'N/A'}</code></td></tr>
+                    </table>
+                </div>
+            </div>
+            <div class="row mt-3">
+                <div class="col-12">
+                    <h6>Description</h6>
+                    <div class="alert alert-info">
+                        ${alert.description || 'Aucune description disponible'}
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        const modal = new bootstrap.Modal(document.getElementById('alertDetailModal'));
+        modal.show();
+    }
+    
+    // Marquer une alerte comme résolue
+    function markAsResolved() {
+        if (!selectedAlertId) return;
+        
+        // Ici vous pourriez faire un appel API pour marquer l'alerte comme résolue
+        // Pour cette démo, on simule juste
+        const alertIndex = currentAlerts.findIndex(a => a.id === selectedAlertId);
+        if (alertIndex !== -1) {
+            currentAlerts[alertIndex].status = 'Resolved';
+            updateAlertsTable(currentAlerts);
+            updateAlertsStats(currentAlerts);
+            
+            const modal = bootstrap.Modal.getInstance(document.getElementById('alertDetailModal'));
+            modal.hide();
+            
+            showNotification('Alerte marquée comme résolue', 'success');
+        }
+    }
+    
+    // Exporter les alertes en CSV
+    function exportAlerts() {
+        const csvContent = convertToCSV(currentAlerts);
+        downloadCSV(csvContent, `cyberguard_alerts_${new Date().toISOString().split('T')[0]}.csv`);
+    }
+    
+    function convertToCSV(alerts) {
+        const headers = ['ID', 'Timestamp', 'Type', 'Severity', 'Source IP', 'Target IP', 'Confidence', 'Status', 'Description'];
+        const rows = alerts.map(alert => [
+            alert.id,
+            alert.timestamp,
+            alert.alert_type,
+            alert.severity,
+            alert.source_ip || '',
+            alert.target_ip || '',
+            alert.confidence,
+            alert.status,
+            alert.description || ''
+        ]);
+        
+        const csvContent = [headers, ...rows]
+            .map(row => row.map(field => `"${field}"`).join(','))
+            .join('\n');
+        
+        return csvContent;
+    }
+    
+    function downloadCSV(csvContent, filename) {
+        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.setAttribute('hidden', '');
+        a.setAttribute('href', url);
+        a.setAttribute('download', filename);
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+    
+    // Fonctions utilitaires
+    function formatTimestamp(timestamp) {
+        return new Date(timestamp).toLocaleString('fr-FR');
+    }
+    
+    function getSeverityColor(severity) {
+        const colors = {
+            'Critical': 'danger',
+            'High': 'warning',
+            'Medium': 'info',
+            'Low': 'success'
+        };
+        return colors[severity] || 'secondary';
+    }
+    
+    function getStatusColor(status) {
+        const colors = {
+            'New': 'primary',
+            'Investigating': 'warning',
+            'Resolved': 'success'
+        };
+        return colors[status] || 'secondary';
+    }
+    
+    // Gestionnaire pour nouvelles alertes (WebSocket)
+    function handleNewAlerts(alerts) {
+        // Recharger automatiquement les données quand de nouvelles alertes arrivent
+        loadAlertsData();
+        
+        alerts.forEach(alert => {
+            if (alert.type === 'new_alert') {
+                showNotification(`Nouvelle alerte: ${alert.data.alert_type}`, 'warning');
+            }
+        });
+    }
+    
+    // Event listeners
+    document.getElementById('hours-filter').addEventListener('change', loadAlertsData);
+    
+    // Initialisation
+    document.addEventListener('DOMContentLoaded', function() {
+        loadAlertsData();
+        
+        // Actualisation automatique toutes les 30 secondes
+        setInterval(loadAlertsData, 30000);
+    });
+</script>
+{% endblock %}
+

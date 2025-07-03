@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""
+Moteur de détection d'intrusions pour CyberGuard AI
+"""
+import os
+import sys
+import threading
+import time
+import queue
+from datetime import datetime, timedelta
+import logging
+from collections import defaultdict
+
+# Ajouter le répertoire parent au path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.data_collection import NetworkCapture, SimulatedCapture
+from src.feature_extraction import NetworkFeatureExtractor
+from src.ml_models import EnsembleIDS
+from src.database import DatabaseManager
+from src.alert_system import AlertManager
+
+class IDSDetectionEngine:
+    def __init__(self, config):
+        self.config = config
+        self.is_running = False
+        
+        # Composants principaux
+        self.network_capture = None
+        self.feature_extractor = NetworkFeatureExtractor()
+        self.ml_ensemble = EnsembleIDS()
+        self.db_manager = DatabaseManager()
+        self.alert_manager = AlertManager(self.db_manager)
+        
+        # Configuration
+        self.analysis_interval = getattr(config, 'ANALYSIS_INTERVAL', 30)
+        self.buffer_size = getattr(config, 'BUFFER_SIZE', 1000)
+        
+        # Buffers et threads
+        self.packet_buffer = []
+        self.analysis_thread = None
+        self.capture_thread = None
+        
+        # Statistiques
+        self.stats = {
+            'packets_processed': 0,
+            'flows_analyzed': 0,
+            'anomalies_detected': 0,
+            'alerts_generated': 0,
+            'start_time': None
+        }
+        
+        # Historique des alertes
+        self.alert_history = {}
+        
+        # Configuration du logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
+    
+    def initialize(self, use_simulation=True):
+        """Initialise le moteur de détection"""
+        try:
+            # Initialiser la capture réseau
+            if use_simulation:
+                self.network_capture = SimulatedCapture()
+                self.logger.info("Mode simulation activé")
+            else:
+                interface = getattr(self.config, 'CAPTURE_INTERFACE', 'any')
+                self.network_capture = NetworkCapture(interface=interface)
+                self.logger.info(f"Capture réseau sur interface {interface}")
+            
+            # Charger les modèles pré-entraînés si disponibles
+            self._load_trained_models()
+            
+            self.logger.info("Moteur IDS initialisé avec succès")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'initialisation: {e}")
+            return False
+    
+    def _load_trained_models(self):
+        """Charge les modèles ML pré-entraînés"""
+        try:
+            model_path = getattr(self.config, 'MODEL_PATH', 'models/trained/')
+            if model_path and os.path.exists(model_path):
+                self.ml_ensemble.load_ensemble(model_path)
+                self.logger.info("Modèles ML chargés avec succès")
+            else:
+                self.logger.warning("Aucun modèle pré-entraîné trouvé. Utilisation des modèles par défaut.")
+        except Exception as e:
+            self.logger.error(f"Erreur lors du chargement des modèles: {e}")
+    
+    def start(self):
+        """Démarre le moteur de détection"""
+        if self.is_running:
+            self.logger.warning("Le moteur est déjà en cours d'exécution")
+            return
+        
+        self.is_running = True
+        self.stats['start_time'] = datetime.now()
+        
+        # Démarrer la capture réseau
+        self.network_capture.start_capture()
+        
+        # Démarrer le thread d'analyse
+        self.analysis_thread = threading.Thread(target=self._analysis_loop)
+        self.analysis_thread.daemon = True
+        self.analysis_thread.start()
+        
+        self.logger.info("Moteur IDS démarré")
+    
+    def stop(self):
+        """Arrête le moteur de détection"""
+        self.is_running = False
+        
+        # Arrêter la capture
+        if self.network_capture:
+            self.network_capture.stop_capture()
+        
+        # Attendre l'arrêt du thread d'analyse
+        if self.analysis_thread:
+            self.analysis_thread.join(timeout=5)
+        
+        self.logger.info("Moteur IDS arrêté")
+    
+    def _analysis_loop(self):
+        """Boucle principale d'analyse"""
+        while self.is_running:
+            try:
+                # Récupérer les nouveaux paquets
+                new_packets = self.network_capture.get_packets(max_packets=self.buffer_size)
+                
+                if new_packets:
+                    self.packet_buffer.extend(new_packets)
+                    self.stats['packets_processed'] += len(new_packets)
+                
+                # Analyser le buffer si suffisant de données
+                if len(self.packet_buffer) >= 10:  # Minimum de paquets pour analyse
+                    self._analyze_current_buffer()
+                
+                # Attendre avant la prochaine analyse
+                time.sleep(self.analysis_interval)
+                
+            except Exception as e:
+                self.logger.error(f"Erreur dans la boucle d'analyse: {e}")
+                time.sleep(1)
+    
+    def _analyze_current_buffer(self):
+        """Analyse le buffer actuel de paquets"""
+        try:
+            if not self.packet_buffer:
+                return
+            
+            # Extraire les features des paquets
+            features_list = self.feature_extractor.extract_features_from_packets(
+                self.packet_buffer
+            )
+            
+            if not features_list:
+                self.packet_buffer.clear()
+                return
+            
+            # Créer un DataFrame pour l'analyse ML
+            features_df = self.feature_extractor.create_feature_dataframe(features_list)
+            
+            if features_df.empty:
+                self.packet_buffer.clear()
+                return
+            
+            # Effectuer la détection avec les modèles ML
+            predictions = self.ml_ensemble.predict_ensemble(features_df)
+            
+            # Traiter les résultats
+            self._process_predictions(features_list, predictions)
+            
+            # Nettoyer le buffer
+            self.packet_buffer.clear()
+            self.stats['flows_analyzed'] += len(features_list)
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'analyse: {e}")
+            self.packet_buffer.clear()
+    
+    def _process_predictions(self, features_list, predictions):
+        """Traite les prédictions et génère les alertes"""
+        for features, prediction in zip(features_list, predictions):
+            try:
+                # Préparer les données du flux pour la base
+                flow_data = {
+                    'src_ip': features.get('src_ip'),
+                    'dst_ip': features.get('dst_ip'),
+                    'src_port': features.get('src_port'),
+                    'dst_port': features.get('dst_port'),
+                    'protocol': features.get('protocol'),
+                    'packet_count': features.get('packet_count'),
+                    'byte_count': features.get('total_bytes'),
+                    'duration': features.get('duration'),
+                    'features': features,
+                    'prediction': prediction.get('prediction'),
+                    'confidence': prediction.get('confidence'),
+                    'is_anomaly': prediction.get('is_anomaly', False)
+                }
+                
+                # Sauvegarder le flux analysé
+                flow_id = self.db_manager.save_network_flow(flow_data)
+                
+                # Générer une alerte si anomalie détectée
+                alert_threshold = getattr(self.config, 'ALERT_THRESHOLD', 0.8)
+                if prediction.get('is_anomaly', False) and prediction.get('confidence', 0) > alert_threshold:
+                    self._generate_alert(features, prediction, flow_id)
+                    self.stats['anomalies_detected'] += 1
+                
+            except Exception as e:
+                self.logger.error(f"Erreur lors du traitement de la prédiction: {e}")
+    
+    def _generate_alert(self, features, prediction, flow_id):
+        """Génère une alerte pour une anomalie détectée"""
+        try:
+            # Déterminer le type et la sévérité de l'alerte
+            alert_type, severity = self._classify_alert(features, prediction)
+            
+            alert_data = {
+                'alert_type': alert_type,
+                'severity': severity,
+                'source_ip': features.get('src_ip'),
+                'target_ip': features.get('dst_ip'),
+                'description': self._generate_alert_description(features, prediction, alert_type),
+                'confidence': prediction.get('confidence'),
+                'flow_id': flow_id,
+                'raw_features': features,
+                'ml_prediction': prediction
+            }
+            
+            # Créer l'alerte dans la base
+            alert_id = self.db_manager.create_alert(alert_data)
+            
+            if alert_id:
+                # Notifier le système d'alertes
+                self.alert_manager.process_alert(alert_data)
+                self.stats['alerts_generated'] += 1
+                
+                self.logger.warning(
+                    f"ALERTE GÉNÉRÉE: {alert_type} - {severity} - "
+                    f"{features.get('src_ip')} -> {features.get('dst_ip')} "
+                    f"(Confiance: {prediction.get('confidence', 0):.2f})"
+                )
+        
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la génération d'alerte: {e}")
+    
+    def _classify_alert(self, features, prediction):
+        """Classifie le type et la sévérité de l'alerte"""
+        confidence = prediction.get('confidence', 0)
+        
+        # Déterminer le type d'alerte basé sur les caractéristiques
+        dst_port = features.get('dst_port', 0)
+        protocol = features.get('protocol', 'Unknown')
+        packet_count = features.get('packet_count', 0)
+        duration = features.get('duration', 0)
+        
+        # Types d'alertes possibles
+        if dst_port in [22, 23, 3389] and packet_count > 10:  # SSH, Telnet, RDP
+            alert_type = "Brute Force Attack"
+        elif dst_port in [445, 139] and protocol == 'TCP':  # SMB
+            alert_type = "SMB Attack"
+        elif packet_count > 100 and duration < 5:  # Beaucoup de paquets rapidement
+            alert_type = "Port Scan"
+        elif features.get('bytes_per_second', 0) > 10000000:  # Beaucoup de données
+            alert_type = "DDoS Attack"
+        elif dst_port == 53 and protocol == 'TCP':  # DNS over TCP inhabituel
+            alert_type = "DNS Tunneling"
+        else:
+            alert_type = "Anomalous Activity"
+        
+        # Déterminer la sévérité
+        if confidence > 0.9:
+            severity = "Critical"
+        elif confidence > 0.8:
+            severity = "High"
+        elif confidence > 0.6:
+            severity = "Medium"
+        else:
+            severity = "Low"
+        
+        return alert_type, severity
+    
+    def _generate_alert_description(self, features, prediction, alert_type):
+        """Génère une description détaillée de l'alerte"""
+        src_ip = features.get('src_ip', 'Unknown')
+        dst_ip = features.get('dst_ip', 'Unknown')
+        dst_port = features.get('dst_port', 0)
+        protocol = features.get('protocol', 'Unknown')
+        confidence = prediction.get('confidence', 0)
+        
+        description = f"{alert_type} détecté: "
+        description += f"Connexion {protocol} de {src_ip} vers {dst_ip}:{dst_port}. "
+        description += f"Confiance ML: {confidence:.2f}. "
+        
+        # Ajouter des détails spécifiques
+        packet_count = features.get('packet_count', 0)
+        duration = features.get('duration', 0)
+        
+        if packet_count > 0:
+            description += f"Paquets: {packet_count}, "
+        if duration > 0:
+            description += f"Durée: {duration:.2f}s, "
+        
+        # Ajouter des métriques d'anomalie si disponibles
+        if 'individual_predictions' in prediction:
+            models_detected = sum(1 for p in prediction['individual_predictions'].values() 
+                                if p.get('is_anomaly', False))
+            description += f"Détection par {models_detected}/3 modèles ML."
+        
+        return description.rstrip(', ') + "."
+    
+    def get_stats(self):
+        """Retourne les statistiques du moteur"""
+        current_stats = self.stats.copy()
+        
+        if current_stats['start_time']:
+            uptime = datetime.now() - current_stats['start_time']
+            current_stats['uptime'] = str(uptime)
+            current_stats['uptime_seconds'] = uptime.total_seconds()
+        
+        return current_stats
+    
+    def get_real_time_status(self):
+        """Retourne le statut en temps réel"""
+        return {
+            'is_running': self.is_running,
+            'buffer_size': len(self.packet_buffer),
+            'stats': self.get_stats(),
+            'last_analysis': datetime.now().isoformat()
+        }
